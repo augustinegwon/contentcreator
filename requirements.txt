@@ -1,0 +1,5 @@
+# YouTube Data API v3 를 파이썬에서 호출하기 위한 공식 라이브러리
+google-api-python-client>=2.100.0
+
+# .env 파일에서 환경변수(API 키 등)를 읽어오기 위한 라이브러리
+python-dotenv>=1.0.0
