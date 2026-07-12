@@ -323,24 +323,36 @@ def update_search_counts(conn, search_id, video_count, comment_count) -> None:
 # ---------------------------------------------------------------------------
 # 4) 메인 로직
 # ---------------------------------------------------------------------------
-def collect(keyword: str, max_videos: int, max_comments: int) -> None:
+def run_collection(keyword: str, max_videos: int, max_comments: int, log=None) -> dict:
+    """키워드를 수집해 DB 에 저장하고, 결과 요약(dict)을 돌려준다.
+
+    이 함수가 '진짜 일'을 하는 부분이다. 터미널(collect.py) 과 웹(app.py) 이
+    둘 다 이 함수를 호출하므로, 수집 로직은 여기 한 곳에만 있다.
+
+    log: 진행 상황을 알리고 싶을 때 넘기는 함수(예: print). 없으면 조용히 진행.
+    반환: {keyword, video_count, comment_count, quota_used, search_id,
+           quota_exceeded, db_path}
+    치명적 오류(키 없음/API 실패)는 RuntimeError 로 올린다.
+    """
+    def _log(msg):
+        if log:
+            log(msg)
+
     # --- API 키 로드 ---------------------------------------------------------
     load_dotenv()  # 현재 폴더의 .env 파일을 읽어 환경변수로 올린다.
     api_key = os.getenv("YOUTUBE_API_KEY")
     if not api_key:
-        print(
-            "[에러] YOUTUBE_API_KEY 를 찾을 수 없습니다.\n"
-            "       .env.example 파일을 복사해 .env 를 만들고, 발급받은 API 키를 넣어주세요.\n"
-            "       예)  cp .env.example .env",
-            file=sys.stderr,
+        raise RuntimeError(
+            "YOUTUBE_API_KEY 를 찾을 수 없습니다. "
+            ".env 파일에 발급받은 API 키를 넣어주세요."
         )
-        sys.exit(1)
 
     # YouTube API 클라이언트를 만든다.
     youtube = build("youtube", "v3", developerKey=api_key)
 
     collected_at = utc_now_iso()  # 이번 스냅샷의 공통 타임스탬프
     quota_used = 0                # 소모 쿼터 추정치를 누적한다.
+    quota_exceeded = False        # 중간에 쿼터가 터졌는지 표시
 
     # DB 연결 및 준비
     conn = sqlite3.connect(DB_FILE)
@@ -355,77 +367,89 @@ def collect(keyword: str, max_videos: int, max_comments: int) -> None:
 
     try:
         # --- 1. 키워드 검색 --------------------------------------------------
-        print(f'키워드 "{keyword}" 검색 중...')
+        _log(f'키워드 "{keyword}" 검색 중...')
         video_ids = search_videos(youtube, keyword, max_videos)
         quota_used += QUOTA_SEARCH
 
         if not video_ids:
-            print("검색 결과가 없습니다.")
+            _log("검색 결과가 없습니다.")
             update_search_counts(conn, search_id, 0, 0)
             conn.commit()
-            _print_summary(keyword, 0, 0, quota_used)
-            return
+        else:
+            # --- 2. 영상 상세 메타데이터 ------------------------------------
+            videos = fetch_video_details(youtube, video_ids)
+            quota_used += QUOTA_VIDEOS
+            insert_videos(conn, search_id, collected_at, videos)
+            total_videos = len(videos)
+            conn.commit()
+            _log(f"영상 {total_videos}개 메타데이터 수집 완료.")
 
-        # --- 2. 영상 상세 메타데이터 ----------------------------------------
-        videos = fetch_video_details(youtube, video_ids)
-        quota_used += QUOTA_VIDEOS
-        insert_videos(conn, search_id, collected_at, videos)
-        total_videos = len(videos)
-        conn.commit()
-        print(f"영상 {total_videos}개 메타데이터 수집 완료.")
-
-        # --- 3. 각 영상의 댓글 ----------------------------------------------
-        for i, v in enumerate(videos, start=1):
-            vid = v["video_id"]
-            try:
-                comments = fetch_comments(youtube, vid, max_comments)
-                quota_used += QUOTA_COMMENTS
-                insert_comments(conn, search_id, vid, collected_at, comments)
-                total_comments += len(comments)
-                conn.commit()
-                print(f"  [{i}/{total_videos}] 댓글 {len(comments)}개 수집  ({v['title'][:40]})")
-            except HttpError as e:
-                # 댓글 비활성 영상은 조용히 건너뛴다.
-                if _is_comments_disabled(e):
-                    quota_used += QUOTA_COMMENTS  # 요청 자체는 나갔으므로 쿼터는 소모됨
-                    print(f"  [{i}/{total_videos}] 댓글 비활성화 → 건너뜀  ({v['title'][:40]})")
+            # --- 3. 각 영상의 댓글 ------------------------------------------
+            for i, v in enumerate(videos, start=1):
+                vid = v["video_id"]
+                try:
+                    comments = fetch_comments(youtube, vid, max_comments)
+                    quota_used += QUOTA_COMMENTS
+                    insert_comments(conn, search_id, vid, collected_at, comments)
+                    total_comments += len(comments)
+                    conn.commit()
+                    _log(f"  [{i}/{total_videos}] 댓글 {len(comments)}개 수집  ({v['title'][:40]})")
+                except HttpError as e:
+                    # 댓글 비활성 영상은 조용히 건너뛴다.
+                    if _is_comments_disabled(e):
+                        quota_used += QUOTA_COMMENTS  # 요청 자체는 나갔으므로 쿼터 소모
+                        _log(f"  [{i}/{total_videos}] 댓글 비활성화 → 건너뜀  ({v['title'][:40]})")
+                        continue
+                    # 쿼터 초과면 중단하되, 지금까지 수집한 건 이미 저장돼 있다.
+                    if _is_quota_exceeded(e):
+                        quota_exceeded = True
+                        _log("[중단] 일일 API 쿼터 초과. 지금까지 수집분은 저장됨.")
+                        break
+                    # 그 외 에러는 해당 영상만 건너뛰고 계속 진행한다.
+                    _log(f"  [{i}/{total_videos}] 댓글 수집 중 에러(건너뜀): {e}")
                     continue
-                # 쿼터 초과면 여기서 중단하되, 지금까지 수집한 건 이미 저장돼 있다.
-                if _is_quota_exceeded(e):
-                    print(
-                        "\n[중단] 일일 API 쿼터를 초과했습니다. "
-                        "지금까지 수집한 데이터는 저장되었습니다.",
-                        file=sys.stderr,
-                    )
-                    break
-                # 그 외 에러는 해당 영상만 건너뛰고 계속 진행한다.
-                print(f"  [{i}/{total_videos}] 댓글 수집 중 에러(건너뜀): {e}", file=sys.stderr)
-                continue
 
         # 최종 집계를 스냅샷 행에 기록한다.
         update_search_counts(conn, search_id, total_videos, total_comments)
         conn.commit()
 
     except HttpError as e:
-        # 검색/영상조회 단계에서 난 에러 처리
-        if _is_quota_exceeded(e):
-            print(
-                "\n[에러] 일일 API 쿼터를 초과했습니다. 내일 다시 시도하거나 "
-                "다른 API 키를 사용하세요.",
-                file=sys.stderr,
-            )
-        else:
-            print(f"\n[에러] YouTube API 호출 실패: {e}", file=sys.stderr)
-        # 부분 결과라도 집계를 갱신하고 저장
+        # 검색/영상조회 단계에서 난 에러 처리. 부분 결과라도 저장한다.
         update_search_counts(conn, search_id, total_videos, total_comments)
         conn.commit()
-        conn.close()
-        sys.exit(1)
-
+        if _is_quota_exceeded(e):
+            raise RuntimeError(
+                "일일 API 쿼터를 초과했습니다. 내일 다시 시도하거나 다른 API 키를 쓰세요."
+            )
+        raise RuntimeError(f"YouTube API 호출 실패: {e}")
     finally:
         conn.close()
 
-    _print_summary(keyword, total_videos, total_comments, quota_used)
+    return {
+        "keyword": keyword,
+        "video_count": total_videos,
+        "comment_count": total_comments,
+        "quota_used": quota_used,
+        "search_id": search_id,
+        "quota_exceeded": quota_exceeded,
+        "db_path": os.path.abspath(DB_FILE),
+    }
+
+
+def collect(keyword: str, max_videos: int, max_comments: int) -> None:
+    """터미널용 진입점: run_collection 을 호출하고 사람이 읽기 좋게 출력한다."""
+    try:
+        result = run_collection(keyword, max_videos, max_comments, log=print)
+    except RuntimeError as e:
+        print(f"\n[에러] {e}", file=sys.stderr)
+        sys.exit(1)
+
+    _print_summary(
+        result["keyword"],
+        result["video_count"],
+        result["comment_count"],
+        result["quota_used"],
+    )
 
 
 def _print_summary(keyword, videos, comments, quota_used) -> None:

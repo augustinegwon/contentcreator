@@ -66,19 +66,25 @@ SHEETS = {
 }
 
 
-def main() -> None:
-    # 1) 데이터 파일이 있는지 먼저 확인한다.
+def build_xlsx(output_file: str = OUTPUT_FILE, log=None) -> dict:
+    """DB 를 읽어 엑셀 파일 1개(시트 3개)를 만든다. 결과 요약(dict)을 돌려준다.
+
+    터미널(view.py) 과 웹(app.py) 이 둘 다 이 함수를 호출한다.
+    log: 진행 상황을 출력할 함수(예: print). 없으면 조용히 진행.
+    DB 파일이 없으면 FileNotFoundError 를 올린다.
+    """
+    def _log(msg):
+        if log:
+            log(msg)
+
     if not os.path.exists(DB_FILE):
-        print(
-            f"[에러] '{DB_FILE}' 파일이 없습니다.\n"
-            "       먼저 수집을 한 번 해야 해요:  python collect.py \"키워드\"",
-            file=sys.stderr,
+        raise FileNotFoundError(
+            f"'{DB_FILE}' 파일이 없습니다. 먼저 수집을 한 번 해야 해요."
         )
-        sys.exit(1)
 
     conn = sqlite3.connect(DB_FILE)
 
-    # 2) 엑셀 파일(워크북)을 새로 만든다.
+    # 엑셀 파일(워크북)을 새로 만든다.
     wb = Workbook()
     wb.remove(wb.active)  # openpyxl 이 기본으로 넣는 빈 시트를 지운다.
 
@@ -105,18 +111,28 @@ def main() -> None:
         ws.freeze_panes = "A2"
         _auto_width(ws, headers, rows)
 
-        print(f"  [{sheet_name}] 시트 → {len(rows)}줄")
+        _log(f"  [{sheet_name}] 시트 → {len(rows)}줄")
         total_rows += len(rows)
 
     conn.close()
+    wb.save(output_file)
 
-    # 3) 저장
-    wb.save(OUTPUT_FILE)
+    return {"path": os.path.abspath(output_file), "total_rows": total_rows}
 
-    path = os.path.abspath(OUTPUT_FILE)
+
+def main() -> None:
+    try:
+        result = build_xlsx(log=print)
+    except FileNotFoundError as e:
+        print(
+            f"[에러] {e}\n       먼저 수집을 해보세요:  python collect.py \"키워드\"",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print("\n" + "=" * 60)
-    print(f"엑셀 파일 저장 완료 (시트 3개, 총 {total_rows}줄)")
-    print(f"위치: {path}")
+    print(f"엑셀 파일 저장 완료 (시트 3개, 총 {result['total_rows']}줄)")
+    print(f"위치: {result['path']}")
     print("이 파일을 더블클릭하면 엑셀/넘버스로 열려요. (아래 탭으로 시트 전환)")
     print("=" * 60)
 
