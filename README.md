@@ -53,6 +53,15 @@ python collect.py "AmazeVR" --max-videos 10 --max-comments 30
 | `comments` | 각 영상의 상위 댓글 (`search_id`, `video_id` 로 연결) |
 
 ### 쌓인 데이터 살펴보기
+
+**방법 1) 엑셀/넘버스로 보기 (추천)**
+```bash
+python view.py
+```
+`export` 폴더에 CSV 3개(`searches.csv`, `videos.csv`, `comments.csv`)가 생깁니다.
+그 파일을 더블클릭하면 엑셀/넘버스로 바로 열립니다. (한글 안 깨짐)
+
+**방법 2) 터미널에서 빠르게 확인**
 ```bash
 sqlite3 youtube_data.db "SELECT id, keyword, collected_at, video_count, comment_count FROM searches;"
 ```
