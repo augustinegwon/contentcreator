@@ -1,32 +1,36 @@
 #!/usr/bin/env python3
 """
-수집한 데이터를 엑셀/넘버스로 열 수 있게 CSV 파일로 뽑아주는 도구.
+수집한 데이터를 엑셀 파일(.xlsx) 하나로 뽑아주는 도구.
 
 사용법:
     python view.py
 
-실행하면 같은 폴더에 export 폴더가 생기고, 그 안에 CSV 3개가 만들어진다.
-그 CSV 파일을 더블클릭하면 엑셀(Excel)이나 넘버스(Numbers)로 바로 열린다.
+실행하면 같은 폴더에 youtube_data.xlsx 파일 1개가 만들어진다.
+그 파일 안에 시트(탭) 3개가 들어 있다:
+    - 수집기록 : 언제 무슨 키워드를 수집했는지 (수집 이벤트 목록)
+    - 영상     : 수집한 영상들 (제목, 조회수, 좋아요 등)
+    - 댓글     : 수집한 댓글들 (작성자, 내용, 좋아요 등)
 
-만드는 파일:
-    export/searches.csv  - 언제 무슨 키워드를 수집했는지 (수집 이벤트 목록)
-    export/videos.csv    - 수집한 영상들 (제목, 조회수, 좋아요 등)
-    export/comments.csv  - 수집한 댓글들 (작성자, 내용, 좋아요 등)
+이 파일을 더블클릭하면 엑셀(Excel)이나 넘버스(Numbers)로 바로 열린다.
 """
 
-import csv
 import os
 import sqlite3
 import sys
 
-DB_FILE = "youtube_data.db"      # collect.py 가 만든 데이터 파일
-EXPORT_DIR = "export"            # CSV 를 모아둘 폴더
+# openpyxl: 파이썬에서 엑셀 .xlsx 파일을 만드는 라이브러리
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+
+DB_FILE = "youtube_data.db"          # collect.py 가 만든 데이터 파일
+OUTPUT_FILE = "youtube_data.xlsx"    # 만들어질 엑셀 파일
 
 
-# 뽑을 표 3개. (파일이름, SQL 쿼리) 형태.
+# (시트이름, SQL 쿼리) 목록. 시트 하나당 표 하나가 들어간다.
 # 사람이 보기 좋은 순서로 컬럼을 정렬해서 가져온다.
-EXPORTS = {
-    "searches.csv": """
+SHEETS = {
+    "수집기록": """
         SELECT id AS 수집번호,
                keyword AS 키워드,
                collected_at AS 수집시각,
@@ -35,7 +39,7 @@ EXPORTS = {
         FROM searches
         ORDER BY id;
     """,
-    "videos.csv": """
+    "영상": """
         SELECT search_id AS 수집번호,
                title AS 제목,
                channel_title AS 채널,
@@ -48,7 +52,7 @@ EXPORTS = {
         FROM videos
         ORDER BY search_id, view_count DESC;
     """,
-    "comments.csv": """
+    "댓글": """
         SELECT search_id AS 수집번호,
                video_id AS 영상ID,
                author AS 작성자,
@@ -72,36 +76,63 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # 2) CSV 를 모아둘 폴더를 만든다. (이미 있으면 그냥 둠)
-    os.makedirs(EXPORT_DIR, exist_ok=True)
-
     conn = sqlite3.connect(DB_FILE)
 
+    # 2) 엑셀 파일(워크북)을 새로 만든다.
+    wb = Workbook()
+    wb.remove(wb.active)  # openpyxl 이 기본으로 넣는 빈 시트를 지운다.
+
+    header_font = Font(bold=True)  # 첫 줄(제목 줄)은 굵게
+
     total_rows = 0
-    for filename, query in EXPORTS.items():
-        path = os.path.join(EXPORT_DIR, filename)
-        rows = conn.execute(query).fetchall()
-        # 컬럼 이름(한글 별칭)을 헤더로 쓴다.
-        headers = [d[0] for d in conn.execute(query).description]
+    for sheet_name, query in SHEETS.items():
+        cursor = conn.execute(query)
+        headers = [d[0] for d in cursor.description]  # 컬럼 이름(한글)
+        rows = cursor.fetchall()
 
-        # encoding="utf-8-sig": 엑셀에서 한글이 깨지지 않도록 BOM 을 붙인다.
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
-            writer.writerow(headers)
-            writer.writerows(rows)
+        ws = wb.create_sheet(title=sheet_name)
 
-        print(f"  {filename:16s} → {len(rows):5d}줄")
+        # 첫 줄: 컬럼 제목 (굵게)
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.font = header_font
+
+        # 나머지 줄: 실제 데이터
+        for row in rows:
+            ws.append(list(row))
+
+        # 보기 좋게: 첫 줄 고정(스크롤해도 제목이 남음) + 컬럼 너비 자동 조정
+        ws.freeze_panes = "A2"
+        _auto_width(ws, headers, rows)
+
+        print(f"  [{sheet_name}] 시트 → {len(rows)}줄")
         total_rows += len(rows)
 
     conn.close()
 
-    # 3) 안내 출력
-    folder = os.path.abspath(EXPORT_DIR)
+    # 3) 저장
+    wb.save(OUTPUT_FILE)
+
+    path = os.path.abspath(OUTPUT_FILE)
     print("\n" + "=" * 60)
-    print(f"CSV {len(EXPORTS)}개 저장 완료 (총 {total_rows}줄)")
-    print(f"위치: {folder}")
-    print("이 폴더의 .csv 파일을 더블클릭하면 엑셀/넘버스로 열려요.")
+    print(f"엑셀 파일 저장 완료 (시트 3개, 총 {total_rows}줄)")
+    print(f"위치: {path}")
+    print("이 파일을 더블클릭하면 엑셀/넘버스로 열려요. (아래 탭으로 시트 전환)")
     print("=" * 60)
+
+
+def _auto_width(ws, headers, rows) -> None:
+    """각 컬럼 너비를 내용 길이에 맞춰 대충 조정한다. (너무 넓어지지 않게 상한선 둠)"""
+    for col_idx in range(len(headers)):
+        # 그 컬럼에서 가장 긴 글자 수를 찾는다. (제목 + 데이터)
+        longest = len(str(headers[col_idx]))
+        for row in rows:
+            value = row[col_idx]
+            if value is not None:
+                longest = max(longest, len(str(value)))
+        # 너비 = 글자 수 + 여유 2칸, 단 최대 60칸까지만
+        width = min(longest + 2, 60)
+        ws.column_dimensions[get_column_letter(col_idx + 1)].width = width
 
 
 if __name__ == "__main__":

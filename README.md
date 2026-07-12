@@ -58,8 +58,8 @@ python collect.py "AmazeVR" --max-videos 10 --max-comments 30
 ```bash
 python view.py
 ```
-`export` 폴더에 CSV 3개(`searches.csv`, `videos.csv`, `comments.csv`)가 생깁니다.
-그 파일을 더블클릭하면 엑셀/넘버스로 바로 열립니다. (한글 안 깨짐)
+`youtube_data.xlsx` 파일 1개가 생깁니다. 안에 시트(탭) 3개(`수집기록`, `영상`, `댓글`)가
+들어 있어요. 더블클릭하면 엑셀/넘버스로 바로 열립니다. (한글 안 깨짐)
 
 **방법 2) 터미널에서 빠르게 확인**
 ```bash
