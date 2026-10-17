@@ -23,7 +23,8 @@ def build(data):
     out.append("> 이 파일은 `build_md.py`로 JSON에서 자동 생성됨. 수정은 JSON에서 할 것.\n")
     out.append(f"- 분석 방법: {meta['analyzed_with']}")
     out.append(f"- 정확도: {meta['accuracy_note']}")
-    out.append(f"- 개인정보: {meta['privacy_note']}\n")
+    out.append(f"- 개인정보: {meta['privacy_note']}")
+    out.append(f"- **만들 범위**: {meta['target_note']}\n")
 
     out.append("## 영상 개요\n")
     out.append(f"- 길이: {video['duration_sec']}초 / {video['fps']}fps")
